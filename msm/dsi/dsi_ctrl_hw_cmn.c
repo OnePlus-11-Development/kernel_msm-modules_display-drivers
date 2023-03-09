@@ -16,6 +16,10 @@
 #include "sde_dbg.h"
 #include "sde_dsc_helper.h"
 #include "sde_vdc_helper.h"
+#if defined(CONFIG_PXLW_IRIS)
+#include "dsi_ctrl.h"
+bool iris_is_chip_supported(void);
+#endif
 
 #define MMSS_MISC_CLAMP_REG_OFF           0x0014
 #define DSI_CTRL_DYNAMIC_FORCE_ON         (0x23F|BIT(8)|BIT(9)|BIT(11)|BIT(21))
@@ -95,20 +99,13 @@ static void dsi_split_link_setup(struct dsi_ctrl_hw *ctrl,
 static void dsi_setup_trigger_controls(struct dsi_ctrl_hw *ctrl,
 				       struct dsi_host_common_cfg *cfg)
 {
-	u32 reg;
+	u32 reg = 0;
 	const u8 trigger_map[DSI_TRIGGER_MAX] = {
 		0x0, 0x2, 0x1, 0x4, 0x5, 0x6 };
 
-	reg = DSI_R32(ctrl, DSI_TRIG_CTRL);
-
-	if (cfg->te_mode == DSI_TE_ON_EXT_PIN)
-		reg |= BIT(31);
-	else
-		reg &= ~BIT(31);
-
-	reg &= ~(0x7 << 4);
+	reg |= (cfg->te_mode == DSI_TE_ON_EXT_PIN) ? BIT(31) : 0;
+	reg |= (trigger_map[cfg->dma_cmd_trigger] & 0x7);
 	reg |= (trigger_map[cfg->mdp_cmd_trigger] & 0x7) << 4;
-
 	DSI_W32(ctrl, DSI_TRIG_CTRL, reg);
 }
 
@@ -637,6 +634,15 @@ void dsi_ctrl_hw_cmn_setup_cmd_stream(struct dsi_ctrl_hw *ctrl,
 
 		DSI_CTRL_HW_DBG(ctrl, "reg_ctrl 0x%x reg_ctrl2 0x%x\n",
 				reg_ctrl, reg_ctrl2);
+#if defined(CONFIG_PXLW_IRIS)
+	} else {
+		if (iris_is_chip_supported() && ctrl->widebus_support) {
+			/* fixed for dynamic switching from dsc panel timing into raw timing */
+			reg = DSI_R32(ctrl, DSI_COMMAND_MODE_MDP_CTRL2);
+			reg &= ~BIT(20);
+			DSI_W32(ctrl, DSI_COMMAND_MODE_MDP_CTRL2, reg);
+		}
+#endif
 	}
 
 	/* HS Timer value */
@@ -883,6 +889,11 @@ void dsi_ctrl_hw_cmn_kickoff_command(struct dsi_ctrl_hw *ctrl,
 	reg = DSI_R32(ctrl, DSI_DMA_FIFO_CTRL);
 	reg |= BIT(20);/* Disable write watermark*/
 	reg |= BIT(16);/* Disable read watermark */
+#if defined(CONFIG_PXLW_IRIS)
+	/* set DMA FIFO read watermark to 15/16 full */
+	if (iris_is_chip_supported())
+		reg = 0x33;
+#endif
 
 	DSI_W32(ctrl, DSI_DMA_FIFO_CTRL, reg);
 	DSI_W32(ctrl, DSI_DMA_CMD_OFFSET, cmd->offset);
@@ -1177,12 +1188,11 @@ void dsi_ctrl_hw_cmn_clear_interrupt_status(struct dsi_ctrl_hw *ctrl, u32 ints)
 		reg |= BIT(30);
 
 	/*
-	 * Do not clear error status. It will be cleared as part of error handler function.
-	 * Do not clear dynamic refresh done status. It will be cleared as part of
-	 * wait4dynamic_refresh_done() function.
+	 * Do not clear error status.
+	 * It will be cleared as part of
+	 * error handler function.
 	 */
-	reg &= ~(BIT(24) | BIT(28));
-
+	reg &= ~BIT(24);
 	DSI_W32(ctrl, DSI_INT_CTRL, reg);
 
 	DSI_CTRL_HW_DBG(ctrl, "Clear interrupts, ints = 0x%x, INT_CTRL=0x%x\n",
@@ -1909,19 +1919,4 @@ bool dsi_ctrl_hw_cmn_vid_engine_busy(struct dsi_ctrl_hw *ctrl)
 		return true;
 
 	return false;
-}
-
-void dsi_ctrl_hw_cmn_init_cmddma_trig_ctrl(struct dsi_ctrl_hw *ctrl,
-					   struct dsi_host_common_cfg *cfg)
-{
-	u32 reg;
-	const u8 trigger_map[DSI_TRIGGER_MAX] = {
-		0x0, 0x2, 0x1, 0x4, 0x5, 0x6 };
-
-	/* Initialize the default trigger used for Command Mode DMA path. */
-	reg = DSI_R32(ctrl, DSI_TRIG_CTRL);
-	reg &= ~BIT(16); /* Reset DMA_TRG_MUX */
-	reg &= ~(0xF); /* Reset DMA_TRIGGER_SEL */
-	reg |= (trigger_map[cfg->dma_cmd_trigger] & 0xF);
-	DSI_W32(ctrl, DSI_TRIG_CTRL, reg);
 }
